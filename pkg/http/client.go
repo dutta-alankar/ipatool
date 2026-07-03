@@ -65,6 +65,14 @@ func NewClient[R interface{}](args Args) Client[R] {
 					return http.ErrUseLastResponse
 				}
 
+				// Never auto-follow redirects for POST requests; Go converts
+				// 301/302 POSTs into GETs, which breaks the auth flow. The login
+				// logic handles redirects itself by re-sending the POST to the
+				// redirect target.
+				if len(via) > 0 && via[len(via)-1].Method == http.MethodPost {
+					return http.ErrUseLastResponse
+				}
+
 				return nil
 			},
 			Transport: &AddHeaderTransport{http.DefaultTransport},
@@ -162,16 +170,26 @@ func (c *client[R]) handleXMLResponse(res *http.Response) (Result[R], error) {
 
 	var data R
 
+	headers := map[string]string{}
+	for key, val := range res.Header {
+		headers[key] = strings.Join(val, "; ")
+	}
+
+	// Redirect responses carry HTML bodies, not plists; return the status
+	// code and headers so the caller can handle the redirect itself.
+	if res.StatusCode >= 300 && res.StatusCode < 400 {
+		return Result[R]{
+			StatusCode: res.StatusCode,
+			Headers:    headers,
+			Data:       data,
+		}, nil
+	}
+
 	normalizedBody := normalizeXMLPlistBody(body)
 
 	_, err = plist.Unmarshal(normalizedBody, &data)
 	if err != nil {
 		return Result[R]{}, fmt.Errorf("failed to unmarshal xml: %w", err)
-	}
-
-	headers := map[string]string{}
-	for key, val := range res.Header {
-		headers[key] = strings.Join(val, "; ")
 	}
 
 	return Result[R]{

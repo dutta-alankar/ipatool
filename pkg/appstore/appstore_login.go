@@ -132,7 +132,11 @@ func (t *appstore) parseLoginResponse(res *http.Result[loginResult], attempt int
 		err      error
 	)
 
-	if res.StatusCode == gohttp.StatusFound {
+	if res.StatusCode == gohttp.StatusFound ||
+		res.StatusCode == gohttp.StatusMovedPermanently ||
+		res.StatusCode == gohttp.StatusSeeOther ||
+		res.StatusCode == gohttp.StatusTemporaryRedirect ||
+		res.StatusCode == gohttp.StatusPermanentRedirect {
 		if redirect, err = res.GetHeader("location"); err != nil {
 			err = fmt.Errorf("failed to retrieve redirect location: %w", err)
 		} else {

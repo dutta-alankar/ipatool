@@ -32,8 +32,16 @@ func (t *appstore) Bag(input BagInput) (BagOutput, error) {
 		return BagOutput{}, fmt.Errorf("received unexpected status code: %d", res.StatusCode)
 	}
 
+	authEndpoint := res.Data.URLBag.AuthEndpoint
+
+	// Apple's native auth endpoint requires a trailing slash; without it the
+	// server responds with a 301 and an HTML body instead of a plist.
+	if strings.Contains(authEndpoint, "/native/fast") && !strings.HasSuffix(authEndpoint, "/") {
+		authEndpoint += "/"
+	}
+
 	return BagOutput{
-		AuthEndpoint: res.Data.URLBag.AuthEndpoint,
+		AuthEndpoint: authEndpoint,
 	}, nil
 }
 
