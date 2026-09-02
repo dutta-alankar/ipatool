@@ -41,6 +41,7 @@ var _ = Describe("AppStore (Login)", func() {
 			loginClient: mockClient,
 			machine:     mockMachine,
 		}
+		loginRetryDelay = 0
 	})
 
 	AfterEach(func() {
@@ -73,14 +74,72 @@ var _ = Describe("AppStore (Login)", func() {
 			BeforeEach(func() {
 				mockClient.EXPECT().
 					Send(gomock.Any()).
-					Return(http.Result[loginResult]{}, errors.New(""))
+					Return(http.Result[loginResult]{}, errors.New("")).
+					AnyTimes()
 			})
 
-			It("returns wrapped error", func() {
+			It("retries and returns wrapped error", func() {
 				_, err := as.Login(LoginInput{
 					Password: testPassword,
 				})
 				Expect(err).To(HaveOccurred())
+				Expect(errors.Is(err, errTransientAuthResponse)).To(BeTrue())
+			})
+		})
+
+		When("store API returns transient empty responses", func() {
+			BeforeEach(func() {
+				mockClient.EXPECT().
+					Send(gomock.Any()).
+					Return(http.Result[loginResult]{StatusCode: 403}, nil).
+					AnyTimes()
+			})
+
+			It("retries and returns a transient error", func() {
+				_, err := as.Login(LoginInput{
+					Password: testPassword,
+				})
+				Expect(err).To(HaveOccurred())
+				Expect(errors.Is(err, errTransientAuthResponse)).To(BeTrue())
+				Expect(err.Error()).To(ContainSubstring("HTTP 403"))
+			})
+		})
+
+		When("the first endpoint is unavailable and the next one succeeds", func() {
+			BeforeEach(func() {
+				gomock.InOrder(
+					mockClient.EXPECT().
+						Send(gomock.Any()).
+						Do(func(req http.Request) {
+							Expect(req.URL).To(HavePrefix(nativeAuthEndpoint))
+						}).
+						Return(http.Result[loginResult]{StatusCode: 403}, nil).
+						Times(maxLoginAttempts),
+					mockClient.EXPECT().
+						Send(gomock.Any()).
+						Do(func(req http.Request) {
+							Expect(req.URL).To(HavePrefix(legacyAuthEndpoint))
+						}).
+						Return(http.Result[loginResult]{
+							StatusCode: 200,
+							Headers:    map[string]string{HTTPHeaderStoreFront: "test-storefront"},
+							Data: loginResult{
+								PasswordToken:       "test-password-token",
+								DirectoryServicesID: "test-ds-id",
+							},
+						}, nil),
+				)
+				mockKeychain.EXPECT().
+					Set("account", gomock.Any()).
+					Return(nil)
+			})
+
+			It("falls back to the next endpoint", func() {
+				out, err := as.Login(LoginInput{
+					Password: testPassword,
+				})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(out.Account.PasswordToken).To(Equal("test-password-token"))
 			})
 		})
 
@@ -187,17 +246,21 @@ var _ = Describe("AppStore (Login)", func() {
 						Expect(req.URL).To(Equal(testRedirectLocation))
 						Expect(req.Payload).To(BeAssignableToTypeOf(&http.XMLPayload{}))
 						x := req.Payload.(*http.XMLPayload)
-						Expect(x.Content).To(HaveKeyWithValue("attempt", "2"))
+						Expect(x.Content).To(HaveKeyWithValue("attempt", "1"))
 					}).
-					Return(http.Result[loginResult]{}, errors.New("test complete"))
+					Return(http.Result[loginResult]{
+						Data: loginResult{
+							FailureType: "random-error",
+						},
+					}, nil)
 				gomock.InOrder(firstCall, secondCall)
 			})
 
-			It("follows the redirect and increments attempt", func() {
+			It("follows the redirect while preserving the original request body", func() {
 				_, err := as.Login(LoginInput{
 					Password: testPassword,
 				})
-				Expect(err).To(MatchError("request failed: test complete"))
+				Expect(err).To(MatchError(ContainSubstring("something went wrong")))
 			})
 		})
 
@@ -209,13 +272,13 @@ var _ = Describe("AppStore (Login)", func() {
 						StatusCode: 302,
 						Headers:    map[string]string{"Location": "hello"},
 					}, nil).
-					Times(4)
+					AnyTimes()
 			})
 			It("bails out", func() {
 				_, err := as.Login(LoginInput{
 					Password: testPassword,
 				})
-				Expect(err).To(MatchError("too many attempts"))
+				Expect(err).To(MatchError(ContainSubstring("too many attempts")))
 			})
 		})
 
